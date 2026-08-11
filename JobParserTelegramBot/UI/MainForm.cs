@@ -7,20 +7,27 @@ public sealed class MainForm : Form
 {
     private readonly IChatManagementService _chatManagement;
     private readonly ITelegramSessionService _session;
+    private readonly IVacancyHistoryScanService _historyScan;
 
     private readonly ListView _listView;
     private readonly TextBox _inputBox;
     private readonly Button _addButton;
     private readonly Button _removeButton;
     private readonly Button _refreshButton;
+    private readonly Button _scanDayButton;
     private readonly Button _toggleButton;
     private readonly Label _statusLabel;
     private readonly System.Windows.Forms.Timer _statusTimer;
+    private CancellationTokenSource? _scanCts;
 
-    public MainForm(IChatManagementService chatManagement, ITelegramSessionService session)
+    public MainForm(
+        IChatManagementService chatManagement,
+        ITelegramSessionService session,
+        IVacancyHistoryScanService historyScan)
     {
         _chatManagement = chatManagement;
         _session = session;
+        _historyScan = historyScan;
 
         Text = "Job Parser — каналы с вакансиями";
         Width = 720;
@@ -101,14 +108,24 @@ public sealed class MainForm : Form
         };
         _refreshButton.Click += async (_, _) => await ReloadAsync();
 
+        _scanDayButton = new Button
+        {
+            Text = "Загрузить за день",
+            Width = 150,
+            Dock = DockStyle.Right,
+            Margin = new Padding(0, 0, 8, 0)
+        };
+        _scanDayButton.Click += async (_, _) => await ScanLastDayAsync();
+
         var hint = new Label
         {
-            Text = "Бот слушает каналы из списка. Добавь @username (аккаунт уже должен быть участником).",
+            Text = "Бот слушает каналы онлайн. «Загрузить за день» — догнать посты за 24 часа.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft
         };
 
         topPanel.Controls.Add(hint);
+        topPanel.Controls.Add(_scanDayButton);
         topPanel.Controls.Add(_refreshButton);
 
         _listView = new ListView
@@ -139,9 +156,10 @@ public sealed class MainForm : Form
             await ReloadAsync();
         };
 
-        FormClosing += (_, _) =>
+        FormClosing += (_, e) =>
         {
             _statusTimer.Stop();
+            _scanCts?.Cancel();
             SetStatus("Остановка бота…");
         };
 
@@ -301,11 +319,76 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task ScanLastDayAsync()
+    {
+        if (_session.Self is null)
+        {
+            MessageBox.Show(this, "Подожди, пока Telegram залогинится.", "Telegram", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            this,
+            "Просканировать все включённые каналы за последние 24 часа?\nПодходящие вакансии придут в Избранное.\nЭто может занять несколько минут.",
+            "Загрузка за день",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (confirm != DialogResult.Yes)
+        {
+            return;
+        }
+
+        _scanCts = new CancellationTokenSource();
+        var progress = new Progress<string>(msg =>
+        {
+            if (IsHandleCreated && !IsDisposed)
+            {
+                BeginInvoke(() => SetStatus(msg));
+            }
+        });
+
+        try
+        {
+            SetBusy(true);
+            SetStatus("Сканирование за последние 24 часа…");
+            var result = await Task.Run(
+                () => _historyScan.ScanLastDayAsync(progress, _scanCts.Token),
+                _scanCts.Token);
+
+            MessageBox.Show(
+                this,
+                $"Готово.\nКаналов: {result.ChatsScanned}\nСообщений проверено: {result.MessagesChecked}\nКарточек отправлено: {result.CardsSent}\nОшибок: {result.Errors}",
+                "Загрузка за день",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+
+            SetStatus($"За день: отправлено {result.CardsSent} из {result.MessagesChecked} сообщений");
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("Сканирование отменено");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Ошибка сканирования", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            SetStatus("Ошибка сканирования");
+        }
+        finally
+        {
+            _scanCts?.Dispose();
+            _scanCts = null;
+            SetBusy(false);
+            UpdateSessionStatus();
+        }
+    }
+
     private void SetBusy(bool busy)
     {
         _addButton.Enabled = !busy;
         _removeButton.Enabled = !busy;
         _refreshButton.Enabled = !busy;
+        _scanDayButton.Enabled = !busy;
         _toggleButton.Enabled = !busy;
         _inputBox.Enabled = !busy;
         UseWaitCursor = busy;

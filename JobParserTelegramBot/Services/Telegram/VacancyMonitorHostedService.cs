@@ -1,7 +1,5 @@
 using JobParserTelegramBot.Data;
 using JobParserTelegramBot.Models;
-using JobParserTelegramBot.Services.Evaluation;
-using JobParserTelegramBot.Services.Filtering;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using TL;
@@ -13,30 +11,24 @@ public sealed class VacancyMonitorHostedService : BackgroundService
 {
     private readonly ITelegramSessionService _session;
     private readonly IChatRepository _chatRepository;
-    private readonly IProcessedMessageStore _processedStore;
-    private readonly VacancyHeuristicFilter _heuristicFilter;
-    private readonly IVacancyEvaluationService _evaluationService;
-    private readonly INotificationService _notificationService;
+    private readonly IVacancyProcessingService _processing;
     private readonly CommandHandler _commandHandler;
+    private readonly IProcessedMessageStore _processedStore;
     private readonly ILogger<VacancyMonitorHostedService> _logger;
 
     public VacancyMonitorHostedService(
         ITelegramSessionService session,
         IChatRepository chatRepository,
-        IProcessedMessageStore processedStore,
-        VacancyHeuristicFilter heuristicFilter,
-        IVacancyEvaluationService evaluationService,
-        INotificationService notificationService,
+        IVacancyProcessingService processing,
         CommandHandler commandHandler,
+        IProcessedMessageStore processedStore,
         ILogger<VacancyMonitorHostedService> logger)
     {
         _session = session;
         _chatRepository = chatRepository;
-        _processedStore = processedStore;
-        _heuristicFilter = heuristicFilter;
-        _evaluationService = evaluationService;
-        _notificationService = notificationService;
+        _processing = processing;
         _commandHandler = commandHandler;
+        _processedStore = processedStore;
         _logger = logger;
     }
 
@@ -80,25 +72,14 @@ public sealed class VacancyMonitorHostedService : BackgroundService
 
     private async Task OnUpdateAsync(Update update, CancellationToken cancellationToken)
     {
-        // UpdateNewMessage also covers channel posts.
         if (update is not UpdateNewMessage { message: Message message })
         {
             return;
         }
 
-        await ProcessMessageAsync(message, cancellationToken);
-    }
-
-    private async Task ProcessMessageAsync(Message message, CancellationToken cancellationToken)
-    {
         if (_commandHandler.IsCommandFromSelf(message))
         {
             await _commandHandler.HandleAsync(message, cancellationToken);
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(message.message))
-        {
             return;
         }
 
@@ -120,41 +101,7 @@ public sealed class VacancyMonitorHostedService : BackgroundService
             return;
         }
 
-        var isNew = await _processedStore.TryMarkProcessedAsync(chatId.Value, message.id, cancellationToken);
-        if (!isNew)
-        {
-            return;
-        }
-
-        if (!_heuristicFilter.LooksLikeVacancy(message.message))
-        {
-            _logger.LogDebug("Skipped by heuristic filter: chat={ChatId} msg={MessageId}", chatId, message.id);
-            return;
-        }
-
-        var vacancy = BuildVacancyMessage(message, source, chatId.Value);
-        _logger.LogInformation("Evaluating vacancy from {ChatTitle} (msg {MessageId})", vacancy.ChatTitle, vacancy.MessageId);
-
-        VacancyEvaluation evaluation;
-        try
-        {
-            evaluation = await _evaluationService.EvaluateAsync(vacancy.Text, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Evaluation failed for chat {ChatId} message {MessageId}", chatId, message.id);
-            return;
-        }
-
-        if (!evaluation.ShouldNotify)
-        {
-            _logger.LogInformation(
-                "Vacancy skipped after evaluation: score={Score}, isVacancy={IsVacancy}",
-                evaluation.Score, evaluation.IsVacancy);
-            return;
-        }
-
-        await _notificationService.SendVacancyCardAsync(vacancy, evaluation, cancellationToken);
+        await _processing.TryProcessVacancyAsync(message, source, cancellationToken);
     }
 
     private async Task<ChatSource?> ResolveSourceAsync(long chatId, CancellationToken cancellationToken)
@@ -172,42 +119,6 @@ public sealed class VacancyMonitorHostedService : BackgroundService
         }
 
         return null;
-    }
-
-    private VacancyMessage BuildVacancyMessage(Message message, ChatSource source, long chatId)
-    {
-        string? authorUsername = null;
-        string? authorDisplayName = null;
-        long? authorId = null;
-
-        if (message.from_id is PeerUser peerUser &&
-            _session.Manager?.Users.TryGetValue(peerUser.user_id, out var user) == true)
-        {
-            authorId = user.id;
-            authorUsername = user.username;
-            authorDisplayName = $"{user.first_name} {user.last_name}".Trim();
-        }
-        else if (message.from_id is PeerChannel peerChannel &&
-                 _session.Manager?.Chats.TryGetValue(peerChannel.channel_id, out var channelChat) == true &&
-                 channelChat is Channel channel)
-        {
-            authorId = channel.ID;
-            authorUsername = channel.username;
-            authorDisplayName = channel.Title;
-        }
-
-        return new VacancyMessage
-        {
-            ChatId = chatId,
-            MessageId = message.id,
-            ChatTitle = source.Title,
-            ChatUsername = source.Username,
-            Text = message.message,
-            AuthorId = authorId,
-            AuthorUsername = authorUsername,
-            AuthorDisplayName = authorDisplayName,
-            IsChannelPost = message.peer_id is PeerChannel
-        };
     }
 
     private static long? GetChatId(Message message) => message.peer_id switch

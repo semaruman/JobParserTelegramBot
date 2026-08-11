@@ -34,6 +34,8 @@ internal static class Program
         builder.Services.AddSingleton<IVacancyEvaluationService, VacancyEvaluationService>();
         builder.Services.AddSingleton<ITelegramSessionService, TelegramSessionService>();
         builder.Services.AddSingleton<IChatManagementService, ChatManagementService>();
+        builder.Services.AddSingleton<IVacancyProcessingService, VacancyProcessingService>();
+        builder.Services.AddSingleton<IVacancyHistoryScanService, VacancyHistoryScanService>();
         builder.Services.AddSingleton<INotificationService, NotificationService>();
         builder.Services.AddSingleton<CommandHandler>();
         builder.Services.AddSingleton<MainForm>();
