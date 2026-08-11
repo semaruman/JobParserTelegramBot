@@ -5,6 +5,7 @@ using JobParserTelegramBot.Services.Filtering;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using TL;
+using Message = TL.Message;
 
 namespace JobParserTelegramBot.Services.Telegram;
 

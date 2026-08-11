@@ -1,25 +1,24 @@
 using System.Text;
-using JobParserTelegramBot.Data;
-using JobParserTelegramBot.Models;
 using Microsoft.Extensions.Logging;
 using TL;
+using Message = TL.Message;
 
 namespace JobParserTelegramBot.Services.Telegram;
 
 public sealed class CommandHandler
 {
-    private readonly IChatRepository _chatRepository;
+    private readonly IChatManagementService _chatManagement;
     private readonly ITelegramSessionService _session;
     private readonly INotificationService _notifications;
     private readonly ILogger<CommandHandler> _logger;
 
     public CommandHandler(
-        IChatRepository chatRepository,
+        IChatManagementService chatManagement,
         ITelegramSessionService session,
         INotificationService notifications,
         ILogger<CommandHandler> logger)
     {
-        _chatRepository = chatRepository;
+        _chatManagement = chatManagement;
         _session = session;
         _notifications = notifications;
         _logger = logger;
@@ -64,7 +63,10 @@ public sealed class CommandHandler
                         break;
                     }
 
-                    await AddChatAsync(parts[1], cancellationToken);
+                    var added = await _chatManagement.AddAsync(parts[1], cancellationToken);
+                    await _notifications.SendTextAsync(
+                        $"Добавлено: {added.Title} (@{added.Username ?? "-"}, id={added.Id})",
+                        cancellationToken);
                     break;
                 case "/removechat":
                     if (parts.Length < 2)
@@ -73,7 +75,10 @@ public sealed class CommandHandler
                         break;
                     }
 
-                    await RemoveChatAsync(parts[1], cancellationToken);
+                    var removed = await _chatManagement.RemoveAsync(parts[1], cancellationToken);
+                    await _notifications.SendTextAsync(
+                        removed ? "Чат удалён из списка." : "Чат не найден в списке.",
+                        cancellationToken);
                     break;
                 default:
                     await _notifications.SendTextAsync("Неизвестная команда. /help", cancellationToken);
@@ -89,10 +94,10 @@ public sealed class CommandHandler
 
     private async Task ListChatsAsync(CancellationToken cancellationToken)
     {
-        var chats = await _chatRepository.GetAllAsync(cancellationToken);
+        var chats = await _chatManagement.ListAsync(cancellationToken);
         if (chats.Count == 0)
         {
-            await _notifications.SendTextAsync("Список чатов пуст. Добавь через /addchat @username", cancellationToken);
+            await _notifications.SendTextAsync("Список чатов пуст. Добавь через GUI или /addchat @username", cancellationToken);
             return;
         }
 
@@ -108,95 +113,6 @@ public sealed class CommandHandler
         await _notifications.SendTextAsync(sb.ToString(), cancellationToken);
     }
 
-    private async Task AddChatAsync(string raw, CancellationToken cancellationToken)
-    {
-        ChatSource chat;
-        if (long.TryParse(raw, out var chatId))
-        {
-            var peer = await _session.ResolvePeerAsync(chatId, null, cancellationToken);
-            if (peer is null)
-            {
-                await _notifications.SendTextAsync(
-                    $"Не удалось найти чат с id={chatId}. Убедись, что аккаунт уже в этом чате.",
-                    cancellationToken);
-                return;
-            }
-
-            chat = await BuildChatSourceAsync(chatId);
-        }
-        else
-        {
-            var username = raw.Trim().TrimStart('@');
-            var resolved = await _session.Client.Contacts_ResolveUsername(username);
-            TelegramSessionService.MergePeers(resolved.users, resolved.chats, _session.Manager);
-
-            if (resolved.Chat is not ChatBase chatBase)
-            {
-                await _notifications.SendTextAsync($"@{username} не является группой/каналом.", cancellationToken);
-                return;
-            }
-
-            chat = new ChatSource
-            {
-                Id = chatBase.ID,
-                Title = chatBase.Title ?? username,
-                Username = username,
-                Enabled = true
-            };
-        }
-
-        await _chatRepository.AddOrUpdateAsync(chat, cancellationToken);
-        await _notifications.SendTextAsync($"Добавлено: {chat.Title} (@{chat.Username ?? "-"}, id={chat.Id})", cancellationToken);
-    }
-
-    private async Task RemoveChatAsync(string raw, CancellationToken cancellationToken)
-    {
-        bool removed;
-        if (long.TryParse(raw, out var chatId))
-        {
-            removed = await _chatRepository.RemoveAsync(chatId, cancellationToken);
-        }
-        else
-        {
-            removed = await _chatRepository.RemoveByUsernameAsync(raw, cancellationToken);
-        }
-
-        await _notifications.SendTextAsync(removed ? "Чат удалён из списка." : "Чат не найден в списке.", cancellationToken);
-    }
-
-    private async Task<ChatSource> BuildChatSourceAsync(long fallbackId)
-    {
-        string title = $"Chat {fallbackId}";
-        string? username = null;
-        long id = fallbackId;
-
-        if (_session.Manager?.Chats.TryGetValue(fallbackId, out var known) == true)
-        {
-            title = known.Title ?? title;
-            id = known.ID;
-            username = known is Channel channel ? channel.username : null;
-            return new ChatSource { Id = id, Title = title, Username = username, Enabled = true };
-        }
-
-        try
-        {
-            var all = await _session.Client.Messages_GetAllChats();
-            TelegramSessionService.MergePeers(null, all.chats, _session.Manager);
-            if (all.chats.TryGetValue(fallbackId, out var found))
-            {
-                title = found.Title ?? title;
-                id = found.ID;
-                username = found is Channel ch ? ch.username : null;
-            }
-        }
-        catch
-        {
-            // keep fallback
-        }
-
-        return new ChatSource { Id = id, Title = title, Username = username, Enabled = true };
-    }
-
     private const string HelpText =
         """
         Команды (пиши себе в Saved Messages):
@@ -206,5 +122,7 @@ public sealed class CommandHandler
         /removechat @username|<chatId> — удалить
         /listchats — список чатов
         /help — справка
+
+        Каналы также можно добавлять в окне приложения.
         """;
 }
